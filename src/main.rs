@@ -153,11 +153,11 @@ async fn dispatch(db: &sled::Db, payload: Vec<Frame>) -> Result<Frame, Box<dyn s
                 _ => return Err(Box::new(RzdbError::IllegalType)),
             };
             // PROTOCOL MODIFICATION: return key set
-            let mut batch = Batch::default();
-            batch.remove(&key[..]);
-            batch.insert(&key[..], &data[..]);
-            if let Err(e) = db.apply_batch(batch) {
-                // if let Err(e) = db.merge(key, &data[..]) {
+            //let mut batch = Batch::default();
+            //batch.remove(&key[..]);
+            //batch.insert(&key[..], &data[..]);
+            //if let Err(e) = db.apply_batch(batch) {
+            if let Err(e) = db.insert(key, &data[..]) {
                 eprintln!("DB insert error {:?}", e);
                 return Ok(Frame::Error(e.to_string()));
             };
