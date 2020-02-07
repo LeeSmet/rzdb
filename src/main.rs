@@ -1,10 +1,13 @@
+use futures::select;
 use redis_protocol::{decode::decode, encode::encode, types::Frame};
 use sled::Batch;
 use tokio::net::{TcpListener, UnixListener};
 use tokio::prelude::*;
+use tokio::sync::mpsc;
 
 // TODO
 const BUFFER_SIZE: usize = 9 * 1024;
+const BATCH_SIZE: usize = 10;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut rt = tokio::runtime::Runtime::new().unwrap();
@@ -138,7 +141,7 @@ async fn dispatch(db: &sled::Db, payload: Vec<Frame>) -> Result<Frame, Box<dyn s
             if payload.len() != 1 {
                 return Err(Box::new(RzdbError::WrongArgumentCount));
             }
-            return Ok(Frame::SimpleString("PONG".to_owned()));
+            Ok(Frame::SimpleString("PONG".to_owned()))
         }
         "SET" => {
             if payload.len() != 3 {
@@ -162,7 +165,7 @@ async fn dispatch(db: &sled::Db, payload: Vec<Frame>) -> Result<Frame, Box<dyn s
                 return Ok(Frame::Error(e.to_string()));
             };
 
-            return Ok(payload[1].clone());
+            Ok(payload[1].clone())
         }
         "GET" => {
             if payload.len() != 2 {
@@ -180,14 +183,14 @@ async fn dispatch(db: &sled::Db, payload: Vec<Frame>) -> Result<Frame, Box<dyn s
                 }
             };
 
-            return match data {
+            match data {
                 None => Ok(Frame::Null),
                 Some(d) => Ok(Frame::BulkString(Vec::from(&*d))),
-            };
+            }
         }
         _ => {
             eprintln!("Unknown command {}", cmd);
-            return Err(Box::new(RzdbError::UnknownCommand));
+            Err(Box::new(RzdbError::UnknownCommand))
         }
     }
 }
@@ -215,4 +218,96 @@ impl std::error::Error for RzdbError {}
 
 fn replace_merge(_: &[u8], _: Option<&[u8]>, new: &[u8]) -> Option<Vec<u8>> {
     Some(new.into())
+}
+
+struct Client<T> {
+    transport: T,
+    otx: mpsc::Sender<DbOperation>,
+    rrx: mpsc::Receiver<DbResult>,
+}
+
+struct DbManager {
+    db: sled::Db,
+    write_buf: [Option<DbOperation>; BATCH_SIZE],
+    buf_size: usize,
+    orx: mpsc::Receiver<DbOperation>,
+    rtx: mpsc::Sender<DbResult>,
+}
+
+impl<T> Client<T>
+where
+    T: AsyncRead + AsyncWrite + Send + Sync,
+{
+    fn new(transport: T, db: sled::Db) -> Self {
+        let (mut otx, mut orx) = mpsc::channel(1);
+        let (mut rtx, mut rrx) = mpsc::channel(1);
+
+        let dbm = DbManager {
+            db,
+            write_buf: [None, None, None, None, None, None, None, None, None, None], // TODO: ???
+            buf_size: BATCH_SIZE,
+            orx,
+            rtx,
+        };
+        tokio::spawn(dbm.run());
+
+        Client {
+            transport,
+            otx,
+            rrx,
+        }
+    }
+
+    async fn run(&self) {
+        // set up read and write buffers
+        let mut read_buf = [0u8; BUFFER_SIZE];
+        let mut write_buf = [0u8; BUFFER_SIZE];
+
+        let mut buf_size = 0;
+
+        loop {}
+    }
+}
+
+impl DbManager {
+    async fn run(&self) {
+        // TODO
+        let buf = [None, None, None, None, None, None, None, None, None, None];
+        let buf_size = 0;
+
+        loop {
+            // Get value from client
+            // TODO: select over timer to flush write buffer in cases of inactivity
+            let req = match self.orx.recv().await {
+                Some(req) => req,
+                // if we got none the sender is dropped, indicating the client disconnected
+                None => return,
+            };
+            // Process request
+            //
+            // Send response
+        }
+    }
+}
+
+impl Drop for DbManager {
+    fn drop(&mut self) {
+        // TODO: flush write buffer
+    }
+}
+
+/// DbOperation messages send from a client to a db processing thread.
+enum DbOperation {
+    /// Write operation, with a key and value
+    Write(Vec<u8>, Vec<u8>),
+    /// Read operation, with a key
+    Read(Vec<u8>),
+    /// Flush operation, flushes the Db write buffer (if any), and explicitly flushes data to disk
+    Flush,
+}
+
+/// DbResult messages send form a db processing thread back to the controlling client
+enum DbResult {
+    // TODO
+// FIXME: add error??
 }
