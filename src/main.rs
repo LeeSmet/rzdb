@@ -297,21 +297,27 @@ impl DbManager {
                     self.buf_size += 1;
                     DbResult::None
                 }
-                DbOperation::Read(key) => match self.db.get(key) {
+                DbOperation::Read(key) => match self.flush_write_buffer() {
                     Err(e) => {
-                        eprintln!("Db get error {:?}", e);
-                        DbResult::Error(Box::new(e))
+                        eprintln!("Db flush error {:?}", e);
+                        DbResult::Error(e)
                     }
-                    Ok(v) => match v {
-                        None => DbResult::None,
-                        Some(value) => DbResult::Read(value[..].into()),
+                    Ok(()) => match self.db.get(key) {
+                        Err(e) => {
+                            eprintln!("Db get error {:?}", e);
+                            DbResult::Error(Box::new(e))
+                        }
+                        Ok(v) => match v {
+                            None => DbResult::None,
+                            Some(value) => DbResult::Read(value[..].into()),
+                        },
                     },
                 },
-                DbOperation::Flush => match self.db.flush() {
+                DbOperation::Flush => match self.flush_write_buffer() {
                     Ok(_) => DbResult::None,
                     Err(e) => {
                         eprintln!("Db flush error {:?}", e);
-                        DbResult::Error(Box::new(e))
+                        DbResult::Error(e)
                     }
                 },
             };
@@ -323,35 +329,34 @@ impl DbManager {
 
             // check if we need to flush
             if self.buf_size >= self.buf_cap {
-                // flush write buffer
-                let mut batch = Batch::default();
-                for op in self.write_buf.drain(..) {
-                    match op {
-                        DbOperation::Write(key, value) => {
-                            batch.insert(key, value);
-                        }
-                        _ => unreachable!(),
-                    };
-                }
-                if let Err(e) = self.db.apply_batch(batch) {
+                if let Err(e) = self.flush_write_buffer() {
                     eprintln!("Failed to apply write batch: {:?}", e);
-                };
-                let _ = self.db.flush();
-                self.buf_size = 0;
+                }
             }
         }
+    }
+
+    fn flush_write_buffer(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // flush write buffer
+        let mut batch = Batch::default();
+        for op in self.write_buf.drain(..) {
+            match op {
+                DbOperation::Write(key, value) => {
+                    batch.insert(key, value);
+                }
+                _ => unreachable!(),
+            };
+        }
+        self.db.apply_batch(batch)?;
+        let _ = self.db.flush()?;
+        self.buf_size = 0;
+        Ok(())
     }
 }
 
 impl Drop for DbManager {
     fn drop(&mut self) {
-        // flush write buffer
-        for op in &self.write_buf {
-            if let DbOperation::Write(key, value) = op {
-                let _ = self.db.insert(key, &value[..]);
-            }
-        }
-        let _ = self.db.flush();
+        let _ = self.flush_write_buffer();
     }
 }
 
