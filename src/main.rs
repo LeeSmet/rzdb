@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 
 // TODO
 const BUFFER_SIZE: usize = 9 * 1024;
-const BATCH_SIZE: usize = 10;
+const BATCH_SIZE: usize = 1_000;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut rt = tokio::runtime::Runtime::new().unwrap();
@@ -299,7 +299,7 @@ impl DbManager {
                 }
                 DbOperation::Read(key) => match self.flush_write_buffer() {
                     Err(e) => {
-                        eprintln!("Db flush error {:?}", e);
+                        eprintln!("Db write flush error {:?}", e);
                         DbResult::Error(e)
                     }
                     Ok(()) => match self.db.get(key) {
@@ -314,9 +314,15 @@ impl DbManager {
                     },
                 },
                 DbOperation::Flush => match self.flush_write_buffer() {
-                    Ok(_) => DbResult::None,
+                    Ok(_) => match self.db.flush_async().await {
+                        Err(e) => {
+                            eprintln!("Db flush error {:?}", e);
+                            DbResult::Error(Box::new(e))
+                        }
+                        Ok(_) => DbResult::None,
+                    },
                     Err(e) => {
-                        eprintln!("Db flush error {:?}", e);
+                        eprintln!("Db write flush error {:?}", e);
                         DbResult::Error(e)
                     }
                 },
@@ -348,7 +354,6 @@ impl DbManager {
             };
         }
         self.db.apply_batch(batch)?;
-        let _ = self.db.flush()?;
         self.buf_size = 0;
         Ok(())
     }
@@ -358,6 +363,7 @@ impl Drop for DbManager {
     fn drop(&mut self) {
         eprintln!("Dropping db thread");
         let _ = self.flush_write_buffer();
+        let _ = self.db.flush();
     }
 }
 
