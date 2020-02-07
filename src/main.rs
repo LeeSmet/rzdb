@@ -356,6 +356,7 @@ impl DbManager {
 
 impl Drop for DbManager {
     fn drop(&mut self) {
+        eprintln!("Dropping db thread");
         let _ = self.flush_write_buffer();
     }
 }

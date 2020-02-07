@@ -8,7 +8,7 @@ edition = "2018"
 
 [dependencies]
 sled = { version = "0.31", features = ["compression", "io_uring"] }
-tokio = { version = "0.2", features = ["io-driver", "io-util","net", "time", "sync", "rt-core"] }
+tokio = { version = "0.2", features = ["io-driver", "io-util","net", "time", "sync", "rt-threaded"] }
 tokio-util = { version = "0.2", features = ["codec"] }
 redis-protocol = "1"
 futures = "0.3"
