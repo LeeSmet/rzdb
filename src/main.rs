@@ -74,7 +74,7 @@ where
     T: AsyncRead + AsyncWrite + Unpin + Send + Sync,
 {
     fn new(transport: T, db: sled::Db) -> Self {
-        let (otx, orx) = mpsc::channel(1);
+        let (otx, orx) = mpsc::channel(BATCH_SIZE);
         let (rtx, rrx) = mpsc::channel(1);
 
         // set up db thread
@@ -215,12 +215,13 @@ where
                 //batch.insert(&key[..], &data[..]);
                 //if let Err(e) = db.apply_batch(batch) {
                 if let Err(e) = self.otx.send(DbOperation::Write(key.clone(), data)).await {
+                    // Channel is full
                     eprintln!("DB insert error {:?}", e);
                     return Ok(Frame::Error(e.to_string()));
                 };
 
                 // wait for the operation to be queued
-                let _ = self.rrx.recv().await;
+                // let _ = self.rrx.recv().await;
 
                 Ok(Frame::BulkString(key))
             }
@@ -292,40 +293,48 @@ impl DbManager {
 
             // Process request
             let resp = match req {
-                DbOperation::Write(_, _) => {
-                    self.write_buf.push(req);
-                    self.buf_size += 1;
-                    DbResult::None
+                //DbOperation::Write(_, _) => {
+                //    self.write_buf.push(req);
+                //    self.buf_size += 1;
+                //    DbResult::None
+                //}
+                DbOperation::Write(key, value) => {
+                    if let Err(e) = self.db.insert(key, value) {
+                        eprintln!("Db write error {:?}", e);
+                    };
+                    // do not send a response on the channel
+                    continue;
                 }
-                DbOperation::Read(key) => match self.flush_write_buffer() {
+                // DbOperation::Read(key) => match self.flush_write_buffer() {
+                //     Err(e) => {
+                //         eprintln!("Db write flush error {:?}", e);
+                //         DbResult::Error(e)
+                //     }
+                //    Ok(()) => match self.db.get(key) {
+                DbOperation::Read(key) => match self.db.get(key) {
                     Err(e) => {
-                        eprintln!("Db write flush error {:?}", e);
-                        DbResult::Error(e)
+                        eprintln!("Db get error {:?}", e);
+                        DbResult::Error(Box::new(e))
                     }
-                    Ok(()) => match self.db.get(key) {
-                        Err(e) => {
-                            eprintln!("Db get error {:?}", e);
-                            DbResult::Error(Box::new(e))
-                        }
-                        Ok(v) => match v {
-                            None => DbResult::None,
-                            Some(value) => DbResult::Read(value[..].into()),
-                        },
+                    Ok(v) => match v {
+                        None => DbResult::None,
+                        Some(value) => DbResult::Read(value[..].into()),
                     },
                 },
-                DbOperation::Flush => match self.flush_write_buffer() {
-                    Ok(_) => match self.db.flush_async().await {
-                        Err(e) => {
-                            eprintln!("Db flush error {:?}", e);
-                            DbResult::Error(Box::new(e))
-                        }
-                        Ok(_) => DbResult::None,
-                    },
-                    Err(e) => {
-                        eprintln!("Db write flush error {:?}", e);
-                        DbResult::Error(e)
-                    }
-                },
+                // DbOperation::Flush => match self.flush_write_buffer() {
+                //     Ok(_) => match self.db.flush_async().await {
+                //         Err(e) => {
+                //             eprintln!("Db flush error {:?}", e);
+                //             DbResult::Error(Box::new(e))
+                //         }
+                //         Ok(_) => DbResult::None,
+                //     },
+                //     Err(e) => {
+                //         eprintln!("Db write flush error {:?}", e);
+                //         DbResult::Error(e)
+                //     }
+                // },
+                DbOperation::Flush => unimplemented!(),
             };
 
             // Send response
@@ -334,35 +343,35 @@ impl DbManager {
             };
 
             // check if we need to flush
-            if self.buf_size >= self.buf_cap {
-                if let Err(e) = self.flush_write_buffer() {
-                    eprintln!("Failed to apply write batch: {:?}", e);
-                }
-            }
+            //if self.buf_size >= self.buf_cap {
+            //    if let Err(e) = self.flush_write_buffer() {
+            //        eprintln!("Failed to apply write batch: {:?}", e);
+            //    }
+            //}
         }
     }
 
-    fn flush_write_buffer(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // flush write buffer
-        let mut batch = Batch::default();
-        for op in self.write_buf.drain(..) {
-            match op {
-                DbOperation::Write(key, value) => {
-                    batch.insert(key, value);
-                }
-                _ => unreachable!(),
-            };
-        }
-        self.db.apply_batch(batch)?;
-        self.buf_size = 0;
-        Ok(())
-    }
+    // fn flush_write_buffer(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    //     // flush write buffer
+    //     let mut batch = Batch::default();
+    //     for op in self.write_buf.drain(..) {
+    //         match op {
+    //             DbOperation::Write(key, value) => {
+    //                 batch.insert(key, value);
+    //             }
+    //             _ => unreachable!(),
+    //         };
+    //     }
+    //     self.db.apply_batch(batch)?;
+    //     self.buf_size = 0;
+    //     Ok(())
+    // }
 }
 
 impl Drop for DbManager {
     fn drop(&mut self) {
         eprintln!("Dropping db thread");
-        let _ = self.flush_write_buffer();
+        // let _ = self.flush_write_buffer();
         let _ = self.db.flush();
     }
 }
