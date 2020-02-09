@@ -1,6 +1,4 @@
-use futures::select;
 use redis_protocol::{decode::decode, encode::encode, types::Frame};
-use sled::Batch;
 use tokio::net::{TcpListener, UnixListener};
 use tokio::prelude::*;
 use tokio::sync::mpsc;
@@ -78,7 +76,7 @@ where
         let (rtx, rrx) = mpsc::channel(1);
 
         // set up db thread
-        let dbm = DbManager::new(db, BATCH_SIZE, orx, rtx);
+        let dbm = DbManager::new(db, orx, rtx);
         tokio::spawn(dbm.run());
 
         Client {
@@ -210,18 +208,11 @@ where
                     _ => return Err(Box::new(RzdbError::IllegalType)),
                 };
                 // PROTOCOL MODIFICATION: return key set
-                //let mut batch = Batch::default();
-                //batch.remove(&key[..]);
-                //batch.insert(&key[..], &data[..]);
-                //if let Err(e) = db.apply_batch(batch) {
                 if let Err(e) = self.otx.send(DbOperation::Write(key.clone(), data)).await {
                     // Channel is full
                     eprintln!("DB insert error {:?}", e);
                     return Ok(Frame::Error(e.to_string()));
                 };
-
-                // wait for the operation to be queued
-                // let _ = self.rrx.recv().await;
 
                 Ok(Frame::BulkString(key))
             }
@@ -257,27 +248,22 @@ where
 
 struct DbManager {
     db: sled::Db,
-    write_buf: Vec<DbOperation>,
-    buf_cap: usize,
-    buf_size: usize,
     orx: mpsc::Receiver<DbOperation>,
     rtx: mpsc::Sender<DbResult>,
+
+    // debug stoofs
+    writes: usize,
+    reads: usize,
 }
 
 impl DbManager {
-    fn new(
-        db: sled::Db,
-        buf_size: usize,
-        orx: mpsc::Receiver<DbOperation>,
-        rtx: mpsc::Sender<DbResult>,
-    ) -> Self {
+    fn new(db: sled::Db, orx: mpsc::Receiver<DbOperation>, rtx: mpsc::Sender<DbResult>) -> Self {
         DbManager {
             db,
-            write_buf: Vec::with_capacity(buf_size),
-            buf_cap: buf_size,
-            buf_size: 0,
             orx,
             rtx,
+            writes: 0,
+            reads: 0,
         }
     }
 
@@ -293,47 +279,27 @@ impl DbManager {
 
             // Process request
             let resp = match req {
-                //DbOperation::Write(_, _) => {
-                //    self.write_buf.push(req);
-                //    self.buf_size += 1;
-                //    DbResult::None
-                //}
                 DbOperation::Write(key, value) => {
+                    self.writes += 1;
                     if let Err(e) = self.db.insert(key, value) {
                         eprintln!("Db write error {:?}", e);
                     };
                     // do not send a response on the channel
                     continue;
                 }
-                // DbOperation::Read(key) => match self.flush_write_buffer() {
-                //     Err(e) => {
-                //         eprintln!("Db write flush error {:?}", e);
-                //         DbResult::Error(e)
-                //     }
-                //    Ok(()) => match self.db.get(key) {
-                DbOperation::Read(key) => match self.db.get(key) {
-                    Err(e) => {
-                        eprintln!("Db get error {:?}", e);
-                        DbResult::Error(Box::new(e))
+                DbOperation::Read(key) => {
+                    self.reads += 1;
+                    match self.db.get(key) {
+                        Err(e) => {
+                            eprintln!("Db get error {:?}", e);
+                            DbResult::Error(Box::new(e))
+                        }
+                        Ok(v) => match v {
+                            None => DbResult::None,
+                            Some(value) => DbResult::Read(value[..].into()),
+                        },
                     }
-                    Ok(v) => match v {
-                        None => DbResult::None,
-                        Some(value) => DbResult::Read(value[..].into()),
-                    },
-                },
-                // DbOperation::Flush => match self.flush_write_buffer() {
-                //     Ok(_) => match self.db.flush_async().await {
-                //         Err(e) => {
-                //             eprintln!("Db flush error {:?}", e);
-                //             DbResult::Error(Box::new(e))
-                //         }
-                //         Ok(_) => DbResult::None,
-                //     },
-                //     Err(e) => {
-                //         eprintln!("Db write flush error {:?}", e);
-                //         DbResult::Error(e)
-                //     }
-                // },
+                }
                 DbOperation::Flush => unimplemented!(),
             };
 
@@ -341,37 +307,16 @@ impl DbManager {
             if let Err(e) = self.rtx.send(resp).await {
                 eprintln!("Failed to send db response to client {:?}", e);
             };
-
-            // check if we need to flush
-            //if self.buf_size >= self.buf_cap {
-            //    if let Err(e) = self.flush_write_buffer() {
-            //        eprintln!("Failed to apply write batch: {:?}", e);
-            //    }
-            //}
         }
     }
-
-    // fn flush_write_buffer(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    //     // flush write buffer
-    //     let mut batch = Batch::default();
-    //     for op in self.write_buf.drain(..) {
-    //         match op {
-    //             DbOperation::Write(key, value) => {
-    //                 batch.insert(key, value);
-    //             }
-    //             _ => unreachable!(),
-    //         };
-    //     }
-    //     self.db.apply_batch(batch)?;
-    //     self.buf_size = 0;
-    //     Ok(())
-    // }
 }
 
 impl Drop for DbManager {
     fn drop(&mut self) {
-        eprintln!("Dropping db thread");
-        // let _ = self.flush_write_buffer();
+        eprintln!(
+            "Dropping db thread, {} writes, {} reads",
+            self.writes, self.reads
+        );
         let _ = self.db.flush();
     }
 }
